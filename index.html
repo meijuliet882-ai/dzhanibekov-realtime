@@ -97,7 +97,8 @@
       if (!backend) return;
       try {
         const data = await fetch(backend + "/api/status", {cache: "no-store"}).then(r => r.json());
-        setStatus(`${data.status || "unknown"} | frame ${data.frame ?? "-"}`, !data.success);
+        const waitingText = data.frame === 0 && data.phone_frame_received ? "已收到手机画面，云端正在处理" : null;
+        setStatus(`${waitingText || data.status || "unknown"} | frame ${data.frame ?? "-"}`, !data.success && !waitingText);
         fields.forEach(name => document.getElementById(name).textContent = numberText(data[name]));
         document.getElementById("marker_count").textContent = data.marker_count ?? "-";
         document.getElementById("ids").textContent = (data.used_marker_ids || []).join(", ") || "-";
@@ -114,7 +115,10 @@
       canvas.getContext("2d").drawImage(camera, 0, 0, width, height);
       canvas.toBlob(async blob => {
         try {
-          if (blob) await fetch(backend + "/api/frame", {method: "POST", headers: {"Content-Type": "image/jpeg"}, body: blob, cache: "no-store"});
+          if (blob) {
+            const response = await fetch(backend + "/api/frame", {method: "POST", headers: {"Content-Type": "image/jpeg"}, body: blob, cache: "no-store"});
+            if (!response.ok) throw new Error("HTTP " + response.status);
+          }
         } catch (error) {
           setStatus("发送摄像头画面失败：" + error.message, true);
         } finally { sending = false; }
@@ -123,7 +127,7 @@
     connectButton.onclick = async () => {
       backend = backendInput.value.trim().replace(/\/$/, "");
       if (!/^https?:\/\//i.test(backend)) { setStatus("后端地址必须以 http:// 或 https:// 开头", true); return; }
-      processed.src = backend + "/video_feed";
+      processed.removeAttribute("src");
       try {
         await fetch(backend + "/api/status", {cache: "no-store"});
         startButton.disabled = false;
@@ -145,7 +149,19 @@
       if (stream) stream.getTracks().forEach(track => track.stop());
       stream = null; camera.srcObject = null; startButton.disabled = false; stopButton.disabled = true;
     };
+    async function refreshProcessedImage() {
+      if (!backend) return;
+      try {
+        const response = await fetch(backend + "/api/snapshot?t=" + Date.now(), {cache: "no-store"});
+        if (!response.ok) return;
+        const blob = await response.blob();
+        const oldUrl = processed.src;
+        processed.src = URL.createObjectURL(blob);
+        if (oldUrl.startsWith("blob:")) URL.revokeObjectURL(oldUrl);
+      } catch (_) {}
+    }
     setInterval(refresh, 300);
+    setInterval(refreshProcessedImage, 250);
   </script>
 </body>
 </html>

@@ -132,14 +132,9 @@ def process_stream(args):
     pending_frame = None
     if web_source:
         print("source=web, waiting for the phone browser camera ...", flush=True)
-        # A cloud service can start before the user grants camera permission.
-        # Keep waiting instead of terminating the processing worker after one timeout.
-        while not STOP_EVENT.is_set() and pending_frame is None:
-            ok, pending_frame, web_sequence = wait_for_web_frame(0, timeout=1.0)
-            if not ok:
-                continue
-        if pending_frame is None:
-            raise RuntimeError("网页摄像头服务已停止")
+        ok, pending_frame, web_sequence = wait_for_web_frame(0, timeout=30.0)
+        if not ok:
+            raise RuntimeError("30秒内没有收到手机网页摄像头画面")
         height, width = pending_frame.shape[:2]
     else:
         cap = cv2.VideoCapture(args.source)
