@@ -125,7 +125,7 @@
         } catch (error) {
           setStatus("发送摄像头画面失败：" + error.message, true);
         } finally { sending = false; }
-      }, "image/jpeg", 0.72);
+      }, "image/jpeg", 0.55);
     }
     connectButton.onclick = async () => {
       backend = backendInput.value.trim().replace(/\/$/, "");
@@ -141,10 +141,10 @@
     startButton.onclick = async () => {
       if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) { setStatus("摄像头需要通过 HTTPS 打开 GitHub 页面", true); return; }
       try {
-        stream = await navigator.mediaDevices.getUserMedia({video: {facingMode: {ideal: "environment"}, width: {ideal: 1280}, height: {ideal: 720}}, audio: false});
+        stream = await navigator.mediaDevices.getUserMedia({video: {facingMode: {ideal: "environment"}, width: {ideal: 640}, height: {ideal: 480}}, audio: false});
         camera.srcObject = stream; await camera.play();
         phoneInput.hidden = true;
-        timer = setInterval(sendFrame, 100);
+        timer = setInterval(sendFrame, 150);
         startButton.disabled = true; stopButton.disabled = false;
       } catch (error) { setStatus("无法启动手机摄像头：" + error.message, true); }
     };
@@ -179,8 +179,8 @@
       } catch (_) {}
     }
     setInterval(refresh, 300);
-    setInterval(refreshProcessedImage, 250);
-    setInterval(refreshPhoneInput, 250);
+    setInterval(refreshProcessedImage, 300);
+    setInterval(refreshPhoneInput, 300);
   </script>
 </body>
 </html>
