@@ -24,6 +24,7 @@ if spec is None or spec.loader is None:
     raise RuntimeError(f"Cannot load {BATCH_PATH}")
 batch = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(batch)
+from phone_realtime_engine import PhoneRealtimeRecognizer
 
 
 app = Flask(__name__)
@@ -32,6 +33,7 @@ STOP_EVENT = threading.Event()
 LATEST_JPEG = None
 INPUT_CONDITION = threading.Condition()
 LATEST_INPUT_FRAME = None
+LATEST_INPUT_JPEG = None
 LATEST_INPUT_SEQUENCE = 0
 LATEST_STATUS = {
     "connected": False,
@@ -114,27 +116,35 @@ def put_text(frame, text: str, x: int, y: int, color=(0, 255, 0), scale=0.72):
 def process_stream(args):
     global LATEST_JPEG, LATEST_STATUS
     cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
-    layout_path = args.marker_layout or cfg["marker_layout"]
-    dictionary_name, layout = batch.load_marker_layout(layout_path)
     detection_cfg = cfg.get("aruco_detection", {})
-    if bool(detection_cfg.get("strict_ensemble", False)):
-        detector = batch.make_strict_aruco_detectors(dictionary_name)
-    else:
-        detector = batch.make_aruco_detector(dictionary_name)
-
-    weights = args.yolo_weights or cfg.get("yolo_weights")
-    model = load_model(weights)
     web_source = isinstance(args.source, str) and args.source.lower() in {
         "web", "browser", "phone-web"
     }
+    detector = None
+    layout = None
+    model = None
+    if not web_source:
+        layout_path = args.marker_layout or cfg["marker_layout"]
+        dictionary_name, layout = batch.load_marker_layout(layout_path)
+        if bool(detection_cfg.get("strict_ensemble", False)):
+            detector = batch.make_strict_aruco_detectors(dictionary_name)
+        else:
+            detector = batch.make_aruco_detector(dictionary_name)
+        weights = args.yolo_weights or cfg.get("yolo_weights")
+        model = load_model(weights)
     cap = None
     web_sequence = 0
     pending_frame = None
     if web_source:
         print("source=web, waiting for the phone browser camera ...", flush=True)
-        ok, pending_frame, web_sequence = wait_for_web_frame(0, timeout=30.0)
-        if not ok:
-            raise RuntimeError("30秒内没有收到手机网页摄像头画面")
+        # A cloud service can start before the user grants camera permission.
+        # Keep waiting instead of terminating the processing worker after one timeout.
+        while not STOP_EVENT.is_set() and pending_frame is None:
+            ok, pending_frame, web_sequence = wait_for_web_frame(0, timeout=1.0)
+            if not ok:
+                continue
+        if pending_frame is None:
+            raise RuntimeError("网页摄像头服务已停止")
         height, width = pending_frame.shape[:2]
     else:
         cap = cv2.VideoCapture(args.source)
@@ -144,6 +154,21 @@ def process_stream(args):
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     camera_path = args.camera_calibration or cfg.get("camera_calibration")
     camera_matrix, dist_coeffs = load_scaled_calibration(camera_path, width, height)
+    phone_recognizer = None
+    if web_source:
+        phone_recognizer = PhoneRealtimeRecognizer(
+            width,
+            height,
+            args.phone_marker_map,
+            args.phone_config,
+        )
+        print(
+            f"recognizer=phone_pose_v2, marker_map={args.phone_marker_map}, "
+            f"camera_config={args.phone_config}",
+            flush=True,
+        )
+        camera_matrix = phone_recognizer.matrix
+        dist_coeffs = phone_recognizer.distortion
     print(f"source={args.source}, size={width}x{height}", flush=True)
     print(f"camera calibration={camera_path or 'fallback'}", flush=True)
 
@@ -205,27 +230,6 @@ def process_stream(args):
                 break
             now = time.perf_counter()
             time_s = now - start_clock
-            if frame_index % yolo_every == 0:
-                cached_boxes = run_yolo_boxes(
-                    model, frame, float(args.yolo_conf), int(args.yolo_imgsz), args.device
-                )
-
-            corners, ids = batch.detect_aruco_in_rois(
-                detector,
-                frame,
-                model=None,
-                conf=float(args.yolo_conf),
-                imgsz=int(args.yolo_imgsz),
-                footer_mask_px=int(cfg.get("footer_mask_px", 24)),
-                precomputed_boxes=cached_boxes,
-                min_consensus=int(detection_cfg.get("min_consensus", 1)),
-                max_upscale=aruco_upscale,
-                full_frame_with_yolo=False,
-                force_upscale=bool(detection_cfg.get("force_upscale", True)),
-                upscale_factors=[float(v) for v in upscale_factors],
-                roi_pad_px=int(detection_cfg.get("roi_pad_px", 80)),
-            )
-            observations = batch.collect_marker_observations(corners, ids, layout)
             success = False
             status = "no_marker"
             mean_error = np.nan
@@ -237,46 +241,86 @@ def process_stream(args):
             euler = np.full(3, np.nan)
             used_ids = []
 
-            if observations:
-                pose_result, used_ids, rejected_ids, marker_errors, obj_points, img_points = (
-                    batch.solve_pose_with_marker_rejection(
-                        observations,
-                        camera_matrix,
-                        dist_coeffs,
-                        prev_rvec,
-                        prev_tvec,
-                        marker_error_limit=float(cfg.get("quality", {}).get(
-                            "max_marker_reprojection_error_px", 6.0
-                        )),
-                        continuity_weight=float(cfg.get("quality", {}).get(
-                            "continuity_weight_px_per_deg", 0.1
-                        )),
-                        translation_weight=float(cfg.get("quality", {}).get(
-                            "translation_weight_px_per_m", 200.0
-                        )),
-                        temporal_gap=1,
+            if phone_recognizer is not None:
+                recognized = phone_recognizer.process(frame, time_s)
+                corners = recognized["corners"]
+                ids = recognized["ids"]
+                success = recognized["success"]
+                status = recognized["status"]
+                mean_error = recognized["reprojection_error_px"]
+                rmat = recognized["rotation"]
+                rvec = recognized["rvec"]
+                tvec = recognized["tvec"]
+                omega = recognized["omega"]
+                rpm = recognized["rpm"]
+                quat_xyzw = recognized["quat"]
+                quat = np.array([
+                    quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]
+                ])
+                euler = recognized["euler"]
+                used_ids = recognized["used_marker_ids"]
+            else:
+                if frame_index % yolo_every == 0:
+                    cached_boxes = run_yolo_boxes(
+                        model, frame, float(args.yolo_conf), int(args.yolo_imgsz), args.device
                     )
+
+                corners, ids = batch.detect_aruco_in_rois(
+                    detector,
+                    frame,
+                    model=None,
+                    conf=float(args.yolo_conf),
+                    imgsz=int(args.yolo_imgsz),
+                    footer_mask_px=int(cfg.get("footer_mask_px", 24)),
+                    precomputed_boxes=cached_boxes,
+                    min_consensus=int(detection_cfg.get("min_consensus", 1)),
+                    max_upscale=aruco_upscale,
+                    full_frame_with_yolo=False,
+                    force_upscale=bool(detection_cfg.get("force_upscale", True)),
+                    upscale_factors=[float(v) for v in upscale_factors],
+                    roi_pad_px=int(detection_cfg.get("roi_pad_px", 80)),
                 )
-                solved, rvec, tvec, mean_error, max_error, method = pose_result
-                if solved:
-                    rmat, _ = cv2.Rodrigues(rvec)
-                    pose_jump = batch.rotation_jump_deg(prev_r, rmat)
-                    depth_ok = float(np.asarray(tvec).reshape(-1)[2]) > 0.0
-                    jump_ok = not np.isfinite(pose_jump) or pose_jump <= max_pose_jump
-                    if mean_error <= max_reprojection and depth_ok and jump_ok:
-                        dt = 0.0 if prev_time is None else time_s - prev_time
-                        omega, omega_mag, rpm = batch.angular_velocity_body(prev_r, rmat, dt)
-                        if np.isfinite(rpm) and rpm > max_rpm:
-                            status = "rpm_limit"
+                observations = batch.collect_marker_observations(corners, ids, layout)
+                if observations:
+                    pose_result, used_ids, rejected_ids, marker_errors, obj_points, img_points = (
+                        batch.solve_pose_with_marker_rejection(
+                            observations,
+                            camera_matrix,
+                            dist_coeffs,
+                            prev_rvec,
+                            prev_tvec,
+                            marker_error_limit=float(cfg.get("quality", {}).get(
+                                "max_marker_reprojection_error_px", 6.0
+                            )),
+                            continuity_weight=float(cfg.get("quality", {}).get(
+                                "continuity_weight_px_per_deg", 0.1
+                            )),
+                            translation_weight=float(cfg.get("quality", {}).get(
+                                "translation_weight_px_per_m", 200.0
+                            )),
+                            temporal_gap=1,
+                        )
+                    )
+                    solved, rvec, tvec, mean_error, max_error, method = pose_result
+                    if solved:
+                        rmat, _ = cv2.Rodrigues(rvec)
+                        pose_jump = batch.rotation_jump_deg(prev_r, rmat)
+                        depth_ok = float(np.asarray(tvec).reshape(-1)[2]) > 0.0
+                        jump_ok = not np.isfinite(pose_jump) or pose_jump <= max_pose_jump
+                        if mean_error <= max_reprojection and depth_ok and jump_ok:
+                            dt = 0.0 if prev_time is None else time_s - prev_time
+                            omega, omega_mag, rpm = batch.angular_velocity_body(prev_r, rmat, dt)
+                            if np.isfinite(rpm) and rpm > max_rpm:
+                                status = "rpm_limit"
+                            else:
+                                success = True
+                                status = "valid"
+                                quat = batch.quat_wxyz_from_rmat(rmat)
+                                euler = batch.euler_xyz_deg_from_rmat(rmat)
                         else:
-                            success = True
-                            status = "valid"
-                            quat = batch.quat_wxyz_from_rmat(rmat)
-                            euler = batch.euler_xyz_deg_from_rmat(rmat)
+                            status = "quality_rejected"
                     else:
-                        status = "quality_rejected"
-                else:
-                    status = "pnp_failed"
+                        status = "pnp_failed"
 
             if success:
                 prev_r, prev_rvec, prev_tvec, prev_time = rmat, rvec, tvec, time_s
@@ -376,7 +420,7 @@ def api_status():
 @app.post("/api/frame")
 def api_frame():
     """Receive one JPEG frame from the phone browser camera."""
-    global LATEST_INPUT_FRAME, LATEST_INPUT_SEQUENCE
+    global LATEST_INPUT_FRAME, LATEST_INPUT_JPEG, LATEST_INPUT_SEQUENCE
     payload = request.get_data(cache=False)
     if not payload:
         return jsonify({"ok": False, "error": "empty frame"}), 400
@@ -386,10 +430,42 @@ def api_frame():
         return jsonify({"ok": False, "error": "invalid jpeg"}), 400
     with INPUT_CONDITION:
         LATEST_INPUT_FRAME = frame
+        LATEST_INPUT_JPEG = bytes(payload)
         LATEST_INPUT_SEQUENCE += 1
         sequence = LATEST_INPUT_SEQUENCE
         INPUT_CONDITION.notify_all()
+    with STATE_LOCK:
+        if LATEST_STATUS.get("status") == "starting":
+            LATEST_STATUS["phone_frame_received"] = sequence
     return jsonify({"ok": True, "sequence": sequence})
+
+
+@app.get("/api/input_snapshot")
+def api_input_snapshot():
+    """Return the latest unprocessed frame received from the phone."""
+    with INPUT_CONDITION:
+        image = LATEST_INPUT_JPEG
+    if not image:
+        return Response(status=204, headers={"Cache-Control": "no-store"})
+    return Response(
+        image,
+        mimetype="image/jpeg",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.get("/api/snapshot")
+def api_snapshot():
+    """Return the latest processed JPEG for polling-friendly cloud hosting."""
+    with STATE_LOCK:
+        image = LATEST_JPEG
+    if not image:
+        return Response(status=204, headers={"Cache-Control": "no-store"})
+    return Response(
+        image,
+        mimetype="image/jpeg",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
 
 
 @app.get("/video_feed")
@@ -412,10 +488,12 @@ def parse_args():
     parser.add_argument("--camera-calibration", default=None)
     parser.add_argument("--marker-layout", default=None)
     parser.add_argument("--yolo-weights", default=None)
+    parser.add_argument("--phone-marker-map", default=str(ROOT / "phone_marker_map.json"))
+    parser.add_argument("--phone-config", default=str(ROOT / "phone_pose_config.json"))
     parser.add_argument("--device", default="cpu", help="cpu, 0, or cuda:0")
     parser.add_argument("--yolo-conf", type=float, default=0.15)
-    parser.add_argument("--yolo-imgsz", type=int, default=640)
-    parser.add_argument("--yolo-every", type=int, default=3)
+    parser.add_argument("--yolo-imgsz", type=int, default=416)
+    parser.add_argument("--yolo-every", type=int, default=6)
     parser.add_argument("--max-reprojection-error", type=float, default=8.0)
     parser.add_argument("--max-pose-jump-deg", type=float, default=45.0)
     parser.add_argument("--max-rpm", type=float, default=3000.0)

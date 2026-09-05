@@ -13,8 +13,9 @@ RUN apt-get update \
 COPY requirements-online.txt ./
 RUN pip install -r requirements-online.txt
 
-COPY online_server.py realtime_server.py common.py 01_batch_pose_yolo_aruco_pnp.py ./
+COPY online_server.py realtime_server.py phone_realtime_engine.py phone_pose_core.py common.py 01_batch_pose_yolo_aruco_pnp.py ./
 COPY config_online.yaml marker_layout_new_body.json yolo_rigid_body_best.pt ./
+COPY phone_marker_map.json phone_pose_config.json ./
 
 EXPOSE 10000
 

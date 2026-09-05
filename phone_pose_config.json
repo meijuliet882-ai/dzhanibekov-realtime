@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "physical_fps": 240.0,
+  "aruco_dictionary": "DICT_6X6_50",
+  "reference_image_size": [1080, 1920],
+  "camera_matrix": [
+    [1426.0, 0.0, 539.5],
+    [0.0, 1426.0, 959.5],
+    [0.0, 0.0, 1.0]
+  ],
+  "distortion_coefficients": [0.0, 0.0, 0.0, 0.0, 0.0],
+  "max_reprojection_error_px": 30.0,
+  "max_track_age_frames": 30,
+  "max_rotation_step_deg": 25.0,
+  "optical_flow_fb_threshold_px": 1.5
+}

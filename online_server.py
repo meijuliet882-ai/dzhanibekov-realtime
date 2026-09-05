@@ -16,6 +16,8 @@ def make_args():
         camera_calibration=None,
         marker_layout=None,
         yolo_weights=None,
+        phone_marker_map=str(runtime.ROOT / "phone_marker_map.json"),
+        phone_config=str(runtime.ROOT / "phone_pose_config.json"),
         device=os.getenv("YOLO_DEVICE", "cpu"),
         yolo_conf=float(os.getenv("YOLO_CONF", "0.10")),
         yolo_imgsz=int(os.getenv("YOLO_IMGSZ", "640")),
