@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>刚体实时识别</title>
+  <style>
+    :root { font-family: Arial, sans-serif; color: #17202a; }
+    body { margin: 0; background: #eef1f4; }
+    header { background: #17202a; color: white; padding: 16px; }
+    main { max-width: 1100px; margin: auto; padding: 12px; }
+    .panel { background: white; border: 1px solid #d8dee4; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; }
+    input { flex: 1; min-width: 220px; padding: 10px; border: 1px solid #bbc4cc; border-radius: 5px; font-size: 14px; }
+    button { border: 0; border-radius: 5px; padding: 10px 14px; background: #1769aa; color: white; font-size: 14px; }
+    button.secondary { background: #68737d; }
+    button:disabled { opacity: .45; }
+    .layout { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    video, img { width: 100%; min-height: 200px; display: block; object-fit: contain; background: #0c1116; border-radius: 5px; }
+    video { transform: scaleX(-1); }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .item { border: 1px solid #e1e5e8; border-radius: 5px; padding: 8px; }
+    .label { color: #68737d; font-size: 12px; }
+    .value { font-size: 18px; margin-top: 3px; }
+    .status { padding: 8px; margin-bottom: 10px; border-radius: 5px; background: #e8f5e9; color: #176b2c; }
+    .bad { background: #fff0ed; color: #a22918; }
+    .note { color: #68737d; font-size: 13px; line-height: 1.5; }
+    @media (max-width: 760px) { .layout { grid-template-columns: 1fr; } main { padding: 8px; } }
+  </style>
+</head>
+<body>
+  <header><strong>刚体实时识别</strong> <span style="opacity:.75">YOLOv8 + ArUco + PnP</span></header>
+  <main>
+    <section class="panel">
+      <div class="row">
+        <input id="backend" placeholder="Python后端地址，例如 https://192.168.137.1:8000">
+        <button id="connect">连接电脑</button>
+      </div>
+      <p class="note">GitHub Pages 只提供网页；YOLOv8、ArUco 和 PnP 在电脑后端运行。手机和电脑应连接同一网络。</p>
+    </section>
+    <section class="panel">
+      <div id="status" class="status">请先填写 Python 后端地址</div>
+      <div class="layout">
+        <div>
+          <h3>手机摄像头</h3>
+          <video id="camera" autoplay playsinline muted></video>
+          <div class="row" style="margin-top:8px">
+            <button id="start" disabled>启动手机摄像头</button>
+            <button id="stop" class="secondary" disabled>停止</button>
+          </div>
+        </div>
+        <div>
+          <h3>电脑标注画面</h3>
+          <img id="processed" alt="电脑处理后的实时画面">
+        </div>
+      </div>
+    </section>
+    <section class="panel">
+      <div class="grid">
+        <div class="item"><div class="label">RPM</div><div id="rpm" class="value">-</div></div>
+        <div class="item"><div class="label">ArUco数量</div><div id="marker_count" class="value">-</div></div>
+        <div class="item"><div class="label">ωx / rad·s⁻¹</div><div id="omega_x" class="value">-</div></div>
+        <div class="item"><div class="label">ωy / rad·s⁻¹</div><div id="omega_y" class="value">-</div></div>
+        <div class="item"><div class="label">ωz / rad·s⁻¹</div><div id="omega_z" class="value">-</div></div>
+        <div class="item"><div class="label">PnP误差 / px</div><div id="reprojection_error_px" class="value">-</div></div>
+        <div class="item"><div class="label">Roll / deg</div><div id="roll_deg" class="value">-</div></div>
+        <div class="item"><div class="label">Pitch / deg</div><div id="pitch_deg" class="value">-</div></div>
+        <div class="item"><div class="label">Yaw / deg</div><div id="yaw_deg" class="value">-</div></div>
+        <div class="item"><div class="label">处理帧率</div><div id="processing_fps" class="value">-</div></div>
+      </div>
+      <p class="note">当前标记ID：<span id="ids">-</span></p>
+    </section>
+  </main>
+  <script>
+    const backendInput = document.getElementById("backend");
+    const connectButton = document.getElementById("connect");
+    const startButton = document.getElementById("start");
+    const stopButton = document.getElementById("stop");
+    const camera = document.getElementById("camera");
+    const canvas = document.createElement("canvas");
+    const processed = document.getElementById("processed");
+    const statusBox = document.getElementById("status");
+    const fields = ["rpm", "omega_x", "omega_y", "omega_z", "reprojection_error_px", "roll_deg", "pitch_deg", "yaw_deg", "processing_fps"];
+    let backend = "";
+    let stream = null;
+    let timer = null;
+    let sending = false;
+
+    function setStatus(text, bad=false) {
+      statusBox.textContent = text;
+      statusBox.className = bad ? "status bad" : "status";
+    }
+    function numberText(value) {
+      return value === null || value === undefined || Number.isNaN(Number(value)) ? "-" : Number(value).toFixed(2);
+    }
+    async function refresh() {
+      if (!backend) return;
+      try {
+        const data = await fetch(backend + "/api/status", {cache: "no-store"}).then(r => r.json());
+        setStatus(`${data.status || "unknown"} | frame ${data.frame ?? "-"}`, !data.success);
+        fields.forEach(name => document.getElementById(name).textContent = numberText(data[name]));
+        document.getElementById("marker_count").textContent = data.marker_count ?? "-";
+        document.getElementById("ids").textContent = (data.used_marker_ids || []).join(", ") || "-";
+      } catch (error) {
+        setStatus("无法连接 Python 后端：" + error.message, true);
+      }
+    }
+    async function sendFrame() {
+      if (!backend || sending || !stream || camera.readyState < 2) return;
+      const width = camera.videoWidth, height = camera.videoHeight;
+      if (!width || !height) return;
+      sending = true;
+      canvas.width = width; canvas.height = height;
+      canvas.getContext("2d").drawImage(camera, 0, 0, width, height);
+      canvas.toBlob(async blob => {
+        try {
+          if (blob) await fetch(backend + "/api/frame", {method: "POST", headers: {"Content-Type": "image/jpeg"}, body: blob, cache: "no-store"});
+        } catch (error) {
+          setStatus("发送摄像头画面失败：" + error.message, true);
+        } finally { sending = false; }
+      }, "image/jpeg", 0.72);
+    }
+    connectButton.onclick = async () => {
+      backend = backendInput.value.trim().replace(/\/$/, "");
+      if (!/^https?:\/\//i.test(backend)) { setStatus("后端地址必须以 http:// 或 https:// 开头", true); return; }
+      processed.src = backend + "/video_feed";
+      try {
+        await fetch(backend + "/api/status", {cache: "no-store"});
+        startButton.disabled = false;
+        setStatus("电脑后端已连接，请启动手机摄像头");
+        refresh();
+      } catch (error) { setStatus("连接失败：" + error.message, true); }
+    };
+    startButton.onclick = async () => {
+      if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) { setStatus("摄像头需要通过 HTTPS 打开 GitHub 页面", true); return; }
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({video: {facingMode: {ideal: "environment"}, width: {ideal: 1280}, height: {ideal: 720}}, audio: false});
+        camera.srcObject = stream; await camera.play();
+        timer = setInterval(sendFrame, 100);
+        startButton.disabled = true; stopButton.disabled = false;
+      } catch (error) { setStatus("无法启动手机摄像头：" + error.message, true); }
+    };
+    stopButton.onclick = () => {
+      if (timer) clearInterval(timer); timer = null;
+      if (stream) stream.getTracks().forEach(track => track.stop());
+      stream = null; camera.srcObject = null; startButton.disabled = false; stopButton.disabled = true;
+    };
+    setInterval(refresh, 300);
+  </script>
+</body>
+</html>
