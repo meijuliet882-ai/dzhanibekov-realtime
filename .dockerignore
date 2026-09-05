@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+*.avi
+*.mp4
+*.mov
+realtime_results/
+results_*/
+web_runtime/
+camera_calibration_data/
+*.csv
+*.npz
+*.zip

@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: dzhanibekov-realtime-backend
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/status
+    autoDeploy: true

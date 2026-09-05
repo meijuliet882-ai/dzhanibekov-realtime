@@ -1,0 +1,21 @@
+aruco_dictionary: DICT_6X6_50
+marker_layout: ./marker_layout_new_body.json
+camera_calibration: null
+yolo_weights: ./yolo_rigid_body_best.pt
+footer_mask_px: 0
+yolo_conf: 0.10
+yolo_imgsz: 640
+
+aruco_detection:
+  strict_ensemble: false
+  min_consensus: 1
+  max_upscale: 2.0
+  force_upscale: true
+  upscale_factors: [2.0]
+  roi_pad_px: 80
+
+quality:
+  max_marker_reprojection_error_px: 8.0
+  continuity_weight_px_per_deg: 0.1
+  translation_weight_px_per_m: 200.0
+
