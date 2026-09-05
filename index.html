@@ -33,10 +33,10 @@
   <main>
     <section class="panel">
       <div class="row">
-        <input id="backend" placeholder="Python后端地址，例如 https://192.168.137.1:8000">
-        <button id="connect">连接电脑</button>
+          <input id="backend" placeholder="Python后端地址，例如 https://192.168.137.1:8000">
+        <button id="connect">连接Python后端</button>
       </div>
-      <p class="note">GitHub Pages 只提供网页；YOLOv8、ArUco 和 PnP 在电脑后端运行。手机和电脑应连接同一网络。</p>
+      <p class="note">手机端启动摄像头并上传画面；电脑端 Python 执行 YOLOv8、ArUco 和 PnP。电脑和手机应连接同一网络。</p>
     </section>
     <section class="panel">
       <div id="status" class="status">请先填写 Python 后端地址</div>
@@ -44,13 +44,14 @@
         <div>
           <h3>手机摄像头</h3>
           <video id="camera" autoplay playsinline muted></video>
+          <img id="phoneInput" alt="手机上传到电脑的原始画面" hidden>
           <div class="row" style="margin-top:8px">
             <button id="start" disabled>启动手机摄像头</button>
             <button id="stop" class="secondary" disabled>停止</button>
           </div>
         </div>
         <div>
-          <h3>电脑标注画面</h3>
+          <h3>云端 Python 标注画面</h3>
           <img id="processed" alt="电脑处理后的实时画面">
         </div>
       </div>
@@ -79,12 +80,14 @@
     const camera = document.getElementById("camera");
     const canvas = document.createElement("canvas");
     const processed = document.getElementById("processed");
+    const phoneInput = document.getElementById("phoneInput");
     const statusBox = document.getElementById("status");
     const fields = ["rpm", "omega_x", "omega_y", "omega_z", "reprojection_error_px", "roll_deg", "pitch_deg", "yaw_deg", "processing_fps"];
     let backend = "";
     let stream = null;
     let timer = null;
     let sending = false;
+    let oldInputUrl = "";
 
     function setStatus(text, bad=false) {
       statusBox.textContent = text;
@@ -131,7 +134,7 @@
       try {
         await fetch(backend + "/api/status", {cache: "no-store"});
         startButton.disabled = false;
-        setStatus("电脑后端已连接，请启动手机摄像头");
+        setStatus("Python后端已连接，请在手机端启动摄像头");
         refresh();
       } catch (error) { setStatus("连接失败：" + error.message, true); }
     };
@@ -140,6 +143,7 @@
       try {
         stream = await navigator.mediaDevices.getUserMedia({video: {facingMode: {ideal: "environment"}, width: {ideal: 1280}, height: {ideal: 720}}, audio: false});
         camera.srcObject = stream; await camera.play();
+        phoneInput.hidden = true;
         timer = setInterval(sendFrame, 100);
         startButton.disabled = true; stopButton.disabled = false;
       } catch (error) { setStatus("无法启动手机摄像头：" + error.message, true); }
@@ -148,6 +152,7 @@
       if (timer) clearInterval(timer); timer = null;
       if (stream) stream.getTracks().forEach(track => track.stop());
       stream = null; camera.srcObject = null; startButton.disabled = false; stopButton.disabled = true;
+      phoneInput.hidden = false;
     };
     async function refreshProcessedImage() {
       if (!backend) return;
@@ -160,8 +165,22 @@
         if (oldUrl.startsWith("blob:")) URL.revokeObjectURL(oldUrl);
       } catch (_) {}
     }
+    async function refreshPhoneInput() {
+      if (!backend || stream) return;
+      try {
+        const response = await fetch(backend + "/api/input_snapshot?t=" + Date.now(), {cache: "no-store"});
+        if (!response.ok) return;
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        phoneInput.src = url;
+        phoneInput.hidden = false;
+        if (oldInputUrl) URL.revokeObjectURL(oldInputUrl);
+        oldInputUrl = url;
+      } catch (_) {}
+    }
     setInterval(refresh, 300);
     setInterval(refreshProcessedImage, 250);
+    setInterval(refreshPhoneInput, 250);
   </script>
 </body>
 </html>
